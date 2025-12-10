@@ -1,11 +1,10 @@
 from multidict import CIMultiDict
 from webkat.util import parse_headers
-from webkat.types import Event, Receive, Scope
+from webkat.types import Receive, Scope
 
 
 class Request:
-    def __init__(self, scope: Scope, receive: Receive, initial_event: Event):
-        self._initial_event: Event = initial_event
+    def __init__(self, scope: Scope, receive: Receive):
         self._receive: Receive = receive
         self._scope: Scope = scope
         self.root_path: str = scope["root_path"]
@@ -36,6 +35,34 @@ class Request:
     def body_read(self):
         return self._body_read
 
+    async def read(self) -> bytes:
+        if self._body_read:
+            raise Exception("Resource exhausted")
+
+        if self.content_length is None:
+            raise ValueError("Unable to read: don't know how much")
+
+        event = await self._receive()
+        body = b""
+        while event["type"] == "http.request":
+            body += event["body"]
+
+            if len(body) > self.content_length:
+                raise OverflowError("Client sent too much data")
+
+            if not event["more_body"]:
+                break
+
+            event = await self._receive()
+
+        if event["type"] == "http.disconnect":
+            raise ConnectionResetError("Client disconnected while sending request body")
+
+        self._body = body
+        self._body_read = True
+
+        return body
+
     def body(self) -> bytes:
         if self.method == "GET":
             raise TypeError("GET requests doesn't have body")
@@ -44,29 +71,3 @@ class Request:
             raise ValueError("Body was not read")
 
         return self._body
-
-    async def read(self) -> bytes:
-        if not hasattr(self, "_initial_event") or self._body_read:
-            raise Exception("Resource exhausted")
-
-        event = self._initial_event
-
-        if self.content_length is None:
-            raise ValueError("Unable to read: don't know how much")
-
-        body = event["body"]
-        while event["type"] == "http.request" and event["more_body"]:
-            event = await self._receive()
-            body += event["body"]
-
-            if len(body) > self.content_length:
-                raise OverflowError("Client sent too much data")
-
-        if event["type"] == "http.disconnect":
-            raise ConnectionResetError("Client disconnected while sending request body")
-
-        self._body = body
-        self._body_read = True
-        del self._initial_event
-
-        return body
